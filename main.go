@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/signal"
 	"syscall"
@@ -56,7 +57,8 @@ func main() {
 		if i == 0 {
 			t.Name = "post:deleted"
 		}
-		check(t.Create(ctx))
+		// Skip errors
+		_ = t.Create(ctx)
 	}
 
 	// process tasks in the background
@@ -85,9 +87,6 @@ func processOne() error {
 	}
 
 	defer func() {
-		if err := tx.Commit(ctx); err != nil {
-			slog.Error("tx failed to commit", "err", err)
-		}
 	}()
 
 	var t Task
@@ -103,16 +102,36 @@ func processOne() error {
 		)
 		returning _id, name, data
 	`).Scan(&t.ID, &t.Name, &t.Data)
+
+	// No rows = no tasks
 	if err == pgx.ErrNoRows {
 		slog.Debug("no tasks, sleeping")
 		time.Sleep(time.Second * 10)
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("tx failed to commit: %w", err)
+		}
 		return nil
 	}
+
+	// Failed to execute query, probably a bad query/schema
 	if err != nil {
-		return err
+		if err := tx.Rollback(ctx); err != nil {
+			return fmt.Errorf("failed to rollback: %w", err)
+		}
+		return fmt.Errorf("failed to query/scan: %w", err)
 	}
+
+	// Process task
 	if err := process(t); err != nil {
+		if err := tx.Rollback(ctx); err != nil {
+			return fmt.Errorf("failed to rollback: %w", err)
+		}
 		return fmt.Errorf("failed to process task %s: %w", t.Name, err)
+	}
+
+	// No errors, so task can be deleted
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("tx failed to commit: %w", err)
 	}
 	return nil
 }
@@ -121,6 +140,15 @@ func process(t Task) error {
 	switch t.Name {
 	case "post:created":
 		slog.Info("made a new post", "data", t.Data)
+		postId := t.Data["id"].(float64)
+		fmt.Println(2^64)
+		if postId == 64 {
+			// 90% failure rate
+			if rand.Float32() < 0.1 {
+				return nil
+			}
+			return fmt.Errorf("cannot get data about post '%v'", postId)
+		}
 		return nil
 	default:
 		slog.Info("no handler for task, skipping.", "task", t)
