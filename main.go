@@ -13,6 +13,8 @@ import (
 	"golang.org/x/exp/slog"
 )
 
+var pool *pgxpool.Pool
+
 type Task struct {
 	ID        string
 	Name      string
@@ -20,7 +22,7 @@ type Task struct {
 	CreatedAt time.Time
 }
 
-func (t Task) Create(ctx context.Context, pool *pgxpool.Pool) error {
+func (t Task) Create(ctx context.Context) error {
 	query := `
 	  insert into tasks(name, data, created_at)
 	  values($1, $2, $3)
@@ -35,13 +37,15 @@ func (t Task) Create(ctx context.Context, pool *pgxpool.Pool) error {
 
 func main() {
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, "user=poc-pg-mq database=poc-pg-mq")
-	check(err)
-	defer pool.Close()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	})))
+
+	var err error
+	pool, err = pgxpool.New(ctx, "user=poc-pg-mq database=poc-pg-mq")
+	check(err)
+	defer pool.Close()
 
 	// make some tasks, so we can process them in a second
 	for i := 0; i < 100; i++ {
@@ -52,13 +56,13 @@ func main() {
 		if i == 0 {
 			t.Name = "post:deleted"
 		}
-		check(t.Create(ctx, pool))
+		check(t.Create(ctx))
 	}
 
 	// process tasks in the background
 	go func() {
 		for {
-			if err := processOne(pool); err != nil {
+			if err := processOne(); err != nil {
 				slog.Error("processOne failed to process task", "err", err)
 			}
 		}
@@ -70,7 +74,8 @@ func main() {
 	<-exit
 }
 
-func processOne(pool *pgxpool.Pool) error {
+func processOne() error {
+	// This timeout should be higher than the "no tasks" timeout, otherwise the tx.Commit will fail
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*12)
 	defer cancel()
 
