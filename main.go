@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"os"
 	"os/signal"
 	"syscall"
@@ -25,11 +24,11 @@ type Task struct {
 
 func (t Task) Create(ctx context.Context) error {
 	query := `
-	  insert into tasks(name, data, created_at)
-	  values($1, $2, $3)
+	  insert into tasks(name, data)
+	  values($1, $2)
 	`
 
-	if _, err := pool.Exec(ctx, query, t.Name, t.Data, t.CreatedAt); err != nil {
+	if _, err := pool.Exec(ctx, query, t.Name, t.Data); err != nil {
 		return err
 	}
 
@@ -47,6 +46,9 @@ func main() {
 	pool, err = pgxpool.New(ctx, "user=poc-pg-mq database=poc-pg-mq")
 	check(err)
 	defer pool.Close()
+
+	// for demo purposes
+	pool.Exec(ctx, `delete from tasks`)
 
 	// make some tasks, so we can process them in a second
 	for i := 0; i < 100; i++ {
@@ -100,8 +102,8 @@ func processOne() error {
 		  for update skip locked
 		  limit 1
 		)
-		returning _id, name, data
-	`).Scan(&t.ID, &t.Name, &t.Data)
+		returning _id, name, data, created_at
+	`).Scan(&t.ID, &t.Name, &t.Data, &t.CreatedAt)
 
 	// No rows = no tasks
 	if err == pgx.ErrNoRows {
@@ -126,6 +128,15 @@ func processOne() error {
 		if err := tx.Rollback(ctx); err != nil {
 			return fmt.Errorf("failed to rollback: %w", err)
 		}
+
+		time.Sleep(time.Second * 1)
+
+		// Tasks older than 24 hours get notified
+		if time.Since(t.CreatedAt) > time.Second * 24 {
+			// TODO: probably log this somewhere else
+			slog.Info("stale task", "task", t)
+		}
+
 		return fmt.Errorf("failed to process task %s: %w", t.Name, err)
 	}
 
@@ -139,16 +150,11 @@ func processOne() error {
 func process(t Task) error {
 	switch t.Name {
 	case "post:created":
-		slog.Info("made a new post", "data", t.Data)
 		postId := t.Data["id"].(float64)
-		fmt.Println(2^64)
 		if postId == 64 {
-			// 90% failure rate
-			if rand.Float32() < 0.1 {
-				return nil
-			}
 			return fmt.Errorf("cannot get data about post '%v'", postId)
 		}
+		slog.Info("made a new post", "data", t.Data["id"])
 		return nil
 	default:
 		slog.Info("no handler for task, skipping.", "task", t)
